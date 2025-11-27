@@ -5,17 +5,26 @@ Each rank owns a sub-block: shape ≈ (local_ny + 2, local_nx + 2) (now both row
 Exchange halos in four directions: up, down, left, right (and optionally corners).
 """
 import argparse
+
+# to parse arguments from command line
 import numpy as np
+
+# multi-dimensional arrays (grid), vectorized computing (neighbouring counting), reshape, roll, etc
 from mpi4py import MPI
+
+# halo exchanges, cartesian topology (2D), rank and size info, gather % scatter operations, sync, non-blocking send/recv
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# added for the images, Agg means do not open windows and render images in PNGs directly, otherwise crashes on cluster
+
 
 def save_frame_png(path, arr):
     plt.figure(figsize=(6, 6))
-    plt.imshow(arr, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+    # arr is the global grid of the shape (ny, nx) gathered on rank 0, numpy array
+    plt.imshow(arr, cmap="hot", vmin=0, vmax=1, interpolation="nearest")
     plt.axis("off")
     plt.tight_layout(pad=0)
     plt.savefig(path, dpi=150, bbox_inches="tight", pad_inches=0)
@@ -28,18 +37,13 @@ def parse_args():
     p.add_argument("--ny", type=int, default=16384, help="rows (Y)")
     p.add_argument("--steps", type=int, default=2000, help="generations")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--init", choices=["gosper", "random"], default="gosper")
     p.add_argument("--print-every", type=int, default=0)
     return p.parse_args()
 
 
-def neighbors_1d_ring(rank, size):
-    up = (rank - 1) % size
-    down = (rank + 1) % size
-    return up, down
-
-
 def decompose_2d(ny, nx, p_rows, p_cols, prow, pcol):
-    # rows
+    # rows, same as 1D
     base_ny = ny // p_rows
     rem_ny = ny % p_rows
     local_ny = base_ny + (1 if prow < rem_ny else 0)
@@ -50,6 +54,13 @@ def decompose_2d(ny, nx, p_rows, p_cols, prow, pcol):
     rem_nx = nx % p_cols
     local_nx = base_nx + (1 if pcol < rem_nx else 0)
     col0 = pcol * base_nx + min(pcol, rem_nx)
+    # same logic as rows but with cols
+    """
+    row0 - Starting global row index this rank owns
+    col0 - Starting global col index this rank owns
+    local_ny - no of rows assigned to this rank
+    local_nx - no of cols assigned to this rank
+    """
 
     return row0, col0, local_ny, local_nx
 
@@ -98,14 +109,17 @@ def seed_gosper(local_grid, ny, nx, row0, col0, local_ny, local_nx):
     )
     pat_row0, pat_col0 = 5, 5  # global starting corner
 
+    # Convert local offsets → global absolute coordinates
     global_rows = pat_row0 + gosper[:, 0]
     global_cols = pat_col0 + gosper[:, 1]
 
     # wrap on torus
     global_rows %= ny
     global_cols %= nx
+    # If the pattern extends beyond the right edge, it wraps to the left.
+    # If the pattern extends beyond the bottom edge, it wraps to the top.
 
-    # which pattern cells fall into THIS block?
+    # pattern cells fall into THIS block
     in_block = (
         (global_rows >= row0)
         & (global_rows < row0 + local_ny)
@@ -120,38 +134,35 @@ def seed_gosper(local_grid, ny, nx, row0, col0, local_ny, local_nx):
     local_cols = (global_cols[in_block] - col0) + 1
 
     local_grid[local_rows, local_cols] = 1
+    # Each rank places the alive pattern cells into the correct positions inside its own piece of the grid.
 
 
 def life_step(curr, nxt):
     # curr/nxt: shape (local_ny+2, local_nx+2) with halos
 
     center = curr[1:-1, 1:-1]
+    # removes the halo rows/columns, center contains only the real cells owned by this rank.
 
     nbrs = (
         curr[0:-2, 0:-2]
+        # Upper-left neighbors - Rows shifted up by 1, columns shifted left by 1
         + curr[0:-2, 1:-1]
-        + curr[0:-2, 2:]  # upper row
+        # Upper neighbors - Rows above the interior rows, same column alignment.
+        + curr[0:-2, 2:]
+        # Upper-right neighbors
         + curr[1:-1, 0:-2]
-        + curr[1:-1, 2:]  # middle row
+        # Left neighbors, Interior rows, columns shifted left
+        + curr[1:-1, 2:]
+        # right neighbours, Interior rows, columns shifted right.
         + curr[2:, 0:-2]
+        # lower-left neighbours, Rows below the center, columns left.
         + curr[2:, 1:-1]
-        + curr[2:, 2:]  # lower row
+        # lower neighbours, Rows below, same columns.
+        + curr[2:, 2:]
+        # Lower-right neighbors, Rows below, columns right.
     )
 
     nxt[1:-1, 1:-1] = ((nbrs == 3) | ((center == 1) & (nbrs == 2))).astype(np.uint8)
-
-
-# we need to gather the data from the MPI ranks and put it into rank0,
-# why we do that is because we need to plot it and matplotlib isn't distributed
-# so we need to know the entire grid data to plot it.
-# in Gatherv, how many rows each rank will send → counts AND
-# where in the final array each rank’s data starts → displs (displacements)
-def counts_displs(ny, size):
-    base, rem = ny // size, ny % size
-    counts = [base + (1 if r < rem else 0) for r in range(size)]
-
-    displs = [sum(counts[:r]) for r in range(size)]
-    return np.array(counts), np.array(displs)
 
 
 def main():
@@ -166,71 +177,111 @@ def main():
 
     # Make a 2D process grid: dims[0] * dims[1] == world_size
     dims = MPI.Compute_dims(world_size, 2)  # e.g. 4→[2,2], 8→[2,4] etc.
-    periods = [True, True]  # torus in both directions
+    # 2 process rows, 4 process cols
+    periods = [True, True]
+    # MPI cartesian support periodic boundries - grid edges wrap wround
+    # periods[0] = True → wrap up/down
+    # periods[1] = True → wrap left/right
     comm2d = comm.Create_cart(dims, periods=periods, reorder=True)
 
     rank = comm2d.Get_rank()
+    # Each process now gets a new rank ID inside the 2D grid communicator.
     coords = comm2d.Get_coords(rank)  # (prow, pcol)
     p_rows, p_cols = dims  # number of ranks in each direction
-    prow, pcol = coords
+    prow, pcol = coords  # this rank's coordinates in the grid
 
     nx, ny = args.nx, args.ny
 
     row0, col0, local_ny, local_nx = decompose_2d(ny, nx, p_rows, p_cols, prow, pcol)
 
+    # each rank own a set of local rows, cols (array) of its block, so it'll look like [4,0,4,4]
     local_info = np.array([row0, col0, local_ny, local_nx], dtype="i")
-    all_info = None
+    all_info = None  # rank0 to gather all ranks for visualization, others are None
     if rank == 0:
         all_info = np.empty((world_size, 4), dtype="i")
+        # Rank 0 allocates a 2D array to hold one local_info entry for each rank.
+
     comm2d.Gather(local_info, all_info, root=0)
+    # This collects the local_info from every rank into all_info on rank 0.
+    """
+    all_info = [
+    [row0(rank0), col0(rank0), local_ny(r0), local_nx(r0)],
+    [row0(rank1), col0(rank1), local_ny(r1), local_nx(r1)],
+    ...
+    ]
+    """
     if rank == 0:
-        # all_info[r] = [row0_r, col0_r, local_ny_r, local_nx_r]
-        block_sizes = all_info[:, 2] * all_info[:, 3]  # local_ny * local_nx per rank
+        block_sizes = all_info[:, 2] * all_info[:, 3]
+        # local_ny * local_nx per rank -> all_info[:,2] = local_ny for each rank, all_info[:,3] = local_nx for each rank
+        # number of interior cells on each rank
         counts_flat = block_sizes.astype("i")
+        # requirement from Gather/ Gatherv to be integer (32-bit integer)
         displs_flat = np.zeros(world_size, dtype="i")
+        # This will be filled with the offsets where each rank’s data starts inside the final flattened buffer.
         displs_flat[1:] = np.cumsum(counts_flat[:-1])
-    else:
+        # cumsum(counts_flat[:-1]) = [16, 32, 48, 64, 80]
+        # displs_flat = [0, 16, 32, 48, 64, 80]
+    else:  # for other ranks
         counts_flat = None
         displs_flat = None
 
     # allocate with halos on BOTH sides
     curr = np.zeros((local_ny + 2, local_nx + 2), dtype=np.uint8)
+    # uint8 - binary, 0 or 1
     nxt = np.zeros_like(curr)
-
-    # counts, displs = counts_displs(ny, size)
+    # life_step(curr, nxt) writes the next generation into nxt -> we swap -> Then nxt becomes a clean buffer for the next step.
+    # This avoids overwriting curr while you're still reading from it.
 
     full = np.empty((ny, nx), dtype=np.uint8) if rank == 0 else None
+    # Rank 0 allocates a large global array to assemble the complete grid. -> generate the image
 
-    # Seed pattern by global coordinates; only owning ranks place cells, ensures that any future random actions will be reproducible
+    # Seed pattern by global coordinates; only owning ranks place cells,
+    # ensures that any future random actions will be reproducible
     np.random.seed(args.seed)
 
-    seed_gosper(curr, ny, nx, row0, col0, local_ny, local_nx)
+    if args.init == "random":
+        curr[1:-1, 1:-1] = np.random.randint(0, 2, (local_ny, local_nx))
+    elif args.init == "gosper":
+        seed_gosper(curr, ny, nx, row0, col0, local_ny, local_nx)
 
-    up, down = comm2d.Shift(direction=0, disp=1)  # row neighbors
-    left, right = comm2d.Shift(direction=1, disp=1)  # column neighbors
+    comm2d.Barrier()
+    t0 = MPI.Wtime()  # start timer (seconds since some MPI-defined time)
 
-    # --- 4) Time stepping ---
+    up, down = comm2d.Shift(direction=0, disp=1)  # row neighbors, vertical neighbours
+    left, right = comm2d.Shift(direction=1, disp=1)
+    # column neighbors, horizontal neighbours
+
     for step in range(args.steps):
         # Halo exchange using your exact pattern: Irecv/Irecv + Isend/Isend + Waitall
-        reqs = []
+        reqs = []  # store all non-blocking operations here so we can Waitall() later.
+
+        # vertical halos (up/down)
         reqs.append(comm2d.Irecv(curr[0, 1:-1], source=up, tag=10))  # top halo
+        # Tag = 10 so it matches the send-down from the UP rank.
+        # Receive from UP neighbor.
+        # Store into your top halo row: curr[0, 1:-1].
         reqs.append(comm2d.Irecv(curr[-1, 1:-1], source=down, tag=11))  # bottom halo
 
-        reqs.append(comm2d.Isend(curr[1, 1:-1], dest=up, tag=11))  # first interior
-        reqs.append(comm2d.Isend(curr[-2, 1:-1], dest=down, tag=10))  # last interior
+        reqs.append(comm2d.Isend(curr[1, 1:-1], dest=up, tag=11))
+        # Your first interior row (just below the top halo) goes to the UP neighbor’s bottom halo
+        reqs.append(comm2d.Isend(curr[-2, 1:-1], dest=down, tag=10))
+        # Your last interior row goes to DOWN neighbor’s top halo.
 
-        # 2) left/right (columns, need copies)
-        send_left = curr[1:-1, 1].copy()
-        send_right = curr[1:-1, -2].copy()
+        # horizontal halos (left/right)
+        # Columns are not contiguous in memory → we must .copy()
+        send_left = curr[1:-1, 1].copy()  # your first interior column
+        send_right = curr[1:-1, -2].copy()  # your last interior column
         recv_left = np.empty_like(send_left)
         recv_right = np.empty_like(send_right)
 
         reqs.append(comm2d.Irecv(recv_left, source=left, tag=20))
+        # From LEFT neighbor. Data is placed into recv_left
         reqs.append(comm2d.Irecv(recv_right, source=right, tag=21))
         reqs.append(comm2d.Isend(send_left, dest=left, tag=21))
         reqs.append(comm2d.Isend(send_right, dest=right, tag=20))
 
         MPI.Request.Waitall(reqs)
+        # ensures its uptodate for the next computation
 
         # fill halo columns
         curr[1:-1, 0] = recv_left  # left halo
@@ -241,13 +292,16 @@ def main():
         life_step(curr, nxt)
         curr, nxt = nxt, curr
 
-        # ---- gather & save frame on rank 0 every print-every steps ----
+        # gather & save frame on rank 0 every print-every steps
         if args.print_every and (step % args.print_every == 0):
             # Flatten our interior block (no halos) into 1D
             local_block = curr[1:-1, 1:-1].ravel()
+            # curr[1:-1, 1:-1] = interior grid
+            # .ravel() turns that 2D block into a 1D array of length
 
             # Root receives all blocks into one big flat buffer
             if rank == 0:
+                # total number of cells in the whole global grid
                 recvbuf = np.empty(int(counts_flat.sum()), dtype=np.uint8)
             else:
                 recvbuf = None
@@ -262,9 +316,14 @@ def main():
                 # Reconstruct full grid from chunks
                 for r in range(world_size):
                     row0_r, col0_r, ny_r, nx_r = all_info[r]
+                    # row0_r, col0_r where that rank’s block starts in the global grid
+                    # block size (ny_r, nx_r)
                     start = displs_flat[r]
+                    # Where in recvbuf this rank’s data starts
                     end = start + counts_flat[r]
+                    # Where it ends (non-inclusive)
                     block = recvbuf[start:end].reshape(ny_r, nx_r)
+                    # Take that 1D chunk and reshape it back into a 2D block
                     full[row0_r : row0_r + ny_r, col0_r : col0_r + nx_r] = block
 
                 # Now full is the global grid → save image
@@ -272,14 +331,24 @@ def main():
 
         if args.print_every and (step % args.print_every == 0):
             local_pop = int(curr[1:-1, 1:-1].sum())
+            # all live cells in the interior region
             total_pop = comm.allreduce(local_pop, op=MPI.SUM)
+            # MPI collective communication
             if rank == 0:
                 print(f"step {step:6d} population={total_pop}")
+
+    comm.Barrier()  # ensure all ranks finished the loop
+    t1 = MPI.Wtime()
+    loop_time = t1 - t0
 
     local_pop = int(curr[1:-1, 1:-1].sum())
     total_pop = comm.allreduce(local_pop, op=MPI.SUM)
     if rank == 0:
         print(f"Done. final population={total_pop}")
+        print(
+            f"RANKS={world_size} STEPS={args.steps} TIME_LOOP={loop_time:.6f} s "
+            f"TIME_PER_STEP={loop_time/args.steps:.6e} s"
+        )
 
 
 if __name__ == "__main__":

@@ -40,7 +40,9 @@ def decompose_rows(ny, size, rank):
     base = ny // size  # number of rows each process gets if they were evenly divided.
     rem = ny % size  # remaining rows
     local_rows = base + (1 if rank < rem else 0)
+    # local rows for that rank, if there are rem, then it'll take that too
     row0 = rank * base + min(rank, rem)
+    # the starting row index for the rank
     return row0, local_rows
 
 
@@ -92,7 +94,8 @@ def seed_gosper(local, nx, row0, local_rows):
         150,
     )  # define where the pattern should start
 
-    # sets the global coordinates of the pattern, the offets given above added to the top left corner (initial state given)
+    # sets the global coordinates of the pattern,
+    # the offets given above added to the top left corner (initial state given)
     global_rows = pattern_row_start + gun[:, 0]
     # periodic boundary conditions, from the right edge to the left edge
     global_cols = (pattern_column_start + gun[:, 1]) % nx
@@ -104,6 +107,7 @@ def seed_gosper(local, nx, row0, local_rows):
 
     if not np.any(in_local_chunk):
         return
+
     rr = (global_rows[in_local_chunk] - row0) + 1  # +1 to skip top halo
     # converting the global_rows indices -> local_row indices
     # Subtract row0 to make them relative to the start of this slab.
@@ -175,7 +179,7 @@ def main():
 
     nx, ny = args.nx, args.ny
 
-    # --- 1) Decompose along rows ---
+    # Decompose along rows
     row0, local_rows = decompose_rows(ny, size, rank)
     counts, displs = counts_displs(ny, size)
 
@@ -191,6 +195,10 @@ def main():
     # Seed pattern by global coordinates; only owning ranks place cells, ensures that any future random actions will be reproducible
     np.random.seed(args.seed)
     seed_gosper(curr, nx, row0, local_rows)
+
+    # everyone is ready before timing
+    comm.Barrier()
+    t0 = MPI.Wtime()  # start timer (seconds since some MPI-defined time)
 
     # neighbors, up and down
     up, down = neighbors_1d_ring(rank, size)
@@ -237,7 +245,7 @@ def main():
         if rank == 0 and args.print_every and (step % args.print_every == 0):
             save_frame_png(f"frame_1D_{step:05d}.png", full)
 
-        # Optional: population checksum to stdout
+        # population checksum to stdout
         if args.print_every and (step % args.print_every == 0):
             local_pop = int(curr[1:-1, :].sum())
             # the population of the cells (alive) on the local grid
@@ -246,11 +254,19 @@ def main():
             if rank == 0:
                 print(f"step {step:6d} population={total_pop}")
 
+    comm.Barrier()  # ensure all ranks finished the loop
+    t1 = MPI.Wtime()
+
+    loop_time = t1 - t0
     # Final checksum
     local_pop = int(curr[1:-1, :].sum())
     total_pop = comm.allreduce(local_pop, op=MPI.SUM)
     if rank == 0:
         print(f"Done. final population={total_pop}")
+        print(
+            f"RANKS={size} STEPS={args.steps} TIME_LOOP={loop_time:.6f} s "
+            f"TIME_PER_STEP={loop_time/args.steps:.6e} s"
+        )
 
 
 if __name__ == "__main__":
