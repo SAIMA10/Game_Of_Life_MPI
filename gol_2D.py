@@ -9,7 +9,8 @@ import argparse
 # to parse arguments from command line
 import numpy as np
 
-# multi-dimensional arrays (grid), vectorized computing (neighbouring counting), reshape, roll, etc
+# multi-dimensional arrays (grid),
+# vectorized computing (neighbouring counting), reshape, roll, etc
 from mpi4py import MPI
 
 # halo exchanges, cartesian topology (2D), rank and size info, gather % scatter operations, sync, non-blocking send/recv
@@ -119,7 +120,7 @@ def seed_gosper(local_grid, ny, nx, row0, col0, local_ny, local_nx):
     # If the pattern extends beyond the right edge, it wraps to the left.
     # If the pattern extends beyond the bottom edge, it wraps to the top.
 
-    # pattern cells fall into THIS block
+    # pattern cells fall into this block
     in_block = (
         (global_rows >= row0)
         & (global_rows < row0 + local_ny)
@@ -129,7 +130,7 @@ def seed_gosper(local_grid, ny, nx, row0, col0, local_ny, local_nx):
     if not np.any(in_block):
         return
 
-    # map global → local (shift by block origin, +1 for halos)
+    # map global → local (shift by block origin, +1 for halos) after figuring out which cells are actaully inside the region
     local_rows = (global_rows[in_block] - row0) + 1
     local_cols = (global_cols[in_block] - col0) + 1
 
@@ -172,7 +173,7 @@ def main():
     # size = comm.Get_size()
 
     comm = MPI.COMM_WORLD
-    world_rank = comm.Get_rank()
+    # world_rank = comm.Get_rank()
     world_size = comm.Get_size()
 
     # Make a 2D process grid: dims[0] * dims[1] == world_size
@@ -221,6 +222,11 @@ def main():
         displs_flat[1:] = np.cumsum(counts_flat[:-1])
         # cumsum(counts_flat[:-1]) = [16, 32, 48, 64, 80]
         # displs_flat = [0, 16, 32, 48, 64, 80]
+        # Rank 0 → place at offset 0
+        # Rank 1 → place at offset 16
+        # Rank 2 → at offset 32
+        # Rank 3 → at offset 48
+
     else:  # for other ranks
         counts_flat = None
         displs_flat = None
@@ -268,7 +274,7 @@ def main():
         # Your last interior row goes to DOWN neighbor’s top halo.
 
         # horizontal halos (left/right)
-        # Columns are not contiguous in memory → we must .copy()
+        # Columns are not contiguous in memory → we must .copy(), rows are cause of row major order in numpy
         send_left = curr[1:-1, 1].copy()  # your first interior column
         send_right = curr[1:-1, -2].copy()  # your last interior column
         recv_left = np.empty_like(send_left)
@@ -311,6 +317,7 @@ def main():
                 (recvbuf, counts_flat, displs_flat, MPI.UNSIGNED_CHAR),
                 root=0,
             )
+            # MPI uses this map to assemble a variable-size composite buffer.
 
             if rank == 0:
                 # Reconstruct full grid from chunks
@@ -321,7 +328,7 @@ def main():
                     start = displs_flat[r]
                     # Where in recvbuf this rank’s data starts
                     end = start + counts_flat[r]
-                    # Where it ends (non-inclusive)
+                    # Where it ends
                     block = recvbuf[start:end].reshape(ny_r, nx_r)
                     # Take that 1D chunk and reshape it back into a 2D block
                     full[row0_r : row0_r + ny_r, col0_r : col0_r + nx_r] = block
@@ -345,10 +352,7 @@ def main():
     total_pop = comm.allreduce(local_pop, op=MPI.SUM)
     if rank == 0:
         print(f"Done. final population={total_pop}")
-        print(
-            f"RANKS={world_size} STEPS={args.steps} TIME_LOOP={loop_time:.6f} s "
-            f"TIME_PER_STEP={loop_time/args.steps:.6e} s"
-        )
+        print(f"RANKS={world_size} STEPS={args.steps} TIME_LOOP={loop_time:.6f} s ")
 
 
 if __name__ == "__main__":
