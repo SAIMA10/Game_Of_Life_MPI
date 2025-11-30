@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=gol_mpi
 #SBATCH --nodes=2
-#SBATCH --ntasks-per-node=8
-#SBATCH --time=03:00:00
+#SBATCH --ntasks-per-node=16
+#SBATCH --time=00:45:00
 #SBATCH --partition=devel
 #SBATCH --account=teach0026
 #SBATCH --output=gol_mpi.%j.out

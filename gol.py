@@ -161,7 +161,7 @@ def life_step(curr, nxt):
 # we need to gather the data from the MPI ranks and put it into rank0,
 # why we do that is because we need to plot it and matplotlib isn't distributed
 # so we need to know the entire grid data to plot it.
-# in Gatherv, how many rows each rank will send → counts AND
+# in Gatherv, how many rows each rank will send → counts
 # where in the final array each rank’s data starts → displs (displacements)
 def counts_displs(ny, size):
     base, rem = ny // size, ny % size
@@ -226,9 +226,9 @@ def main():
 
         # Compute next generation on interior
         life_step(curr, nxt)
+
         # After compute, you swap so curr always holds the current generation and
         # nxt becomes the scratch buffer for the next loop.
-
         # swap buffers
         curr, nxt = nxt, curr
 
@@ -263,10 +263,7 @@ def main():
     total_pop = comm.allreduce(local_pop, op=MPI.SUM)
     if rank == 0:
         print(f"Done. final population={total_pop}")
-        print(
-            f"RANKS={size} STEPS={args.steps} TIME_LOOP={loop_time:.6f} s "
-            f"TIME_PER_STEP={loop_time/args.steps:.6e} s"
-        )
+        print(f"RANKS={size} STEPS={args.steps} TIME_LOOP={loop_time:.6f}  s")
 
 
 if __name__ == "__main__":
