@@ -1,0 +1,22 @@
+step      0 population=39
+step    100 population=65
+step    200 population=84
+step    300 population=89
+step    400 population=115
+step    500 population=134
+step    600 population=139
+step    700 population=165
+step    800 population=184
+step    900 population=189
+step   1000 population=215
+step   1100 population=234
+step   1200 population=239
+step   1300 population=265
+step   1400 population=284
+step   1500 population=289
+step   1600 population=315
+step   1700 population=334
+step   1800 population=339
+step   1900 population=365
+Done. final population=384
+RANKS=8 STEPS=2000 TIME_LOOP=911.415309 s TIME_PER_STEP=4.557077e-01 s
